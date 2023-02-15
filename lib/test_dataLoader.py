@@ -15,15 +15,9 @@ class ParseData(object):
         self.mode = mode
         self.random_seed = args.random_seed
         self.args = args
-        self.max_pred = args.max_pred
         self.total_step = args.total_ode_step
         self.cutting_edge = args.cutting_edge
         self.num_pre = args.extrap_num
-
-        self.max_loc = None
-        self.min_loc = None
-        self.max_vel = None
-        self.min_vel = None
 
         torch.manual_seed(self.random_seed)
         np.random.seed(self.random_seed)
@@ -43,6 +37,7 @@ class ParseData(object):
         vel = np.load(self.dataset_path + '/vel_' + data_type + self.suffix + '.npy', allow_pickle=True)[:cut_num]
         edges = np.load(self.dataset_path + '/edges_' + data_type + self.suffix + '.npy', allow_pickle=True)[:cut_num]  # [500,5,5]
         times = np.load(self.dataset_path + '/times_' + data_type + self.suffix + '.npy', allow_pickle=True)[:cut_num]  # 【500，5]
+        joint_times = np.load(self.dataset_path + '/joint_times_' + data_type + self.suffix + '.npy', allow_pickle=True)[:cut_num]  # (N_set, N_t)
 
         self.num_graph = loc.shape[0]
         self.num_atoms = loc.shape[1]
@@ -50,44 +45,25 @@ class ParseData(object):
         print("number graph in   "+data_type+"   is %d" % self.num_graph)
         print("number atoms in   " + data_type + "   is %d" % self.num_atoms)
 
-        if self.suffix == "_springs5" or self.suffix == "_charged5":
-            # Normalize features to [-1, 1], across test and train dataset
-
-            if self.max_loc == None:
-                loc, max_loc, min_loc = self.normalize_features(loc,
-                                                                self.num_atoms)  # [num_sims,num_atoms, (timestamps,2)]
-                vel, max_vel, min_vel = self.normalize_features(vel, self.num_atoms)
-                self.max_loc = max_loc
-                self.min_loc = min_loc
-                self.max_vel = max_vel
-                self.min_vel = min_vel
-            else:
-                loc = (loc - self.min_loc) * 2 / (self.max_loc - self.min_loc) - 1
-                vel = (vel - self.min_vel) * 2 / (self.max_vel - self.min_vel) - 1
-
-        else:
-            # From function normalize_features
-            value_list_length = [balls[i].shape[0] for i in
-                    range(self.num_atoms) for balls in vel]  # [2500] num_train * num_ball
-            self.timelength = max(value_list_length)
-            obs_lengths = np.array(value_list_length)
-            print(f"obs_lengths min: {obs_lengths.min()} max: {obs_lengths.max()} mean: {obs_lengths.mean()}")
+        # From function normalize_features
+        value_list_length = [balls[i].shape[0] for i in
+                range(self.num_atoms) for balls in vel]  # [2500] num_train * num_ball
+        self.timelength = max(value_list_length)
+        obs_lengths = np.array(value_list_length)
+        print(f"obs_lengths min: {obs_lengths.min()} max: {obs_lengths.max()} mean: {obs_lengths.mean()}")
 
         # split data w.r.t interp and extrap, also normalize times
-        if self.mode=="interp":
-            loc_en,vel_en,times_en = self.interp_extrap(loc,vel,times,self.mode,data_type)
-            loc_de = loc_en
-            vel_de = vel_en
-            times_de = times_en
-        elif self.mode == "extrap":
-            loc_en,vel_en,times_en,loc_de,vel_de,times_de = self.interp_extrap(loc,vel,times,self.mode,data_type)
+        #loc_en,vel_en,times_en = self.interp_extrap(loc,vel,times,joint_times,self.mode,data_type)
+        # This is just the same when we use full sequence
+        loc_en,vel_en,times_en = loc,vel,times
+
+        moved_times_en = times_en - 0.5*self.total_step
 
         #Encoder dataloader
-        series_list_observed, loc_observed, vel_observed, times_observed = self.split_data(loc_en, vel_en, times_en)
-        if self.mode == "interp":
-            time_begin = 0
-        else:
-            time_begin = 1
+
+        loc_observed, vel_observed, times_observed = self.split_data(loc_en, vel_en,
+                moved_times_en)
+        time_begin = 1
         encoder_data_loader, graph_data_loader = self.transfer_data(loc_observed, vel_observed, edges,
                                                                     times_observed, time_begin=time_begin)
 
@@ -105,86 +81,24 @@ class ParseData(object):
         graph_data_loader = Loader(edges, batch_size=self.batch_size)
 
 
-        # Decoder Dataloader
-        if self.mode=="interp":
-            series_list_de = series_list_observed
-        elif self.mode == "extrap":
-            series_list_de = self.decoder_data(loc_de,vel_de,times_de)
-        decoder_data_loader = Loader(series_list_de, batch_size=self.batch_size * self.num_atoms, shuffle=False,
-                                     collate_fn=lambda batch: self.variable_time_collate_fn_activity(
-                                         batch))  # num_graph*num_ball [tt,vals,masks]
+        num_batch = len(encoder_data_loader)
+        #  encoder_data_loader = utils.inf_generator(encoder_data_loader)
+        #  graph_data_loader = utils.inf_generator(graph_data_loader)
 
-
-        num_batch = len(decoder_data_loader)
-        encoder_data_loader = utils.inf_generator(encoder_data_loader)
-        graph_data_loader = utils.inf_generator(graph_data_loader)
-        decoder_data_loader = utils.inf_generator(decoder_data_loader)
-
-        return encoder_data_loader, decoder_data_loader, graph_data_loader, num_batch
-
-
+        return encoder_data_loader, graph_data_loader, num_batch, joint_times, times_en
 
     def interp_extrap(self,loc,vel,times,mode,data_type):
         loc_observed = np.ones_like(loc)
-        vel_observed = np.ones_like(vel)
+        vel_observed = np.ones_like(vel) # Same shape
         times_observed = np.ones_like(times)
-        if mode =="interp":
-            if data_type== "test":
-                # get ride of the extra nodes in testing data.
-                for i in range(self.num_graph):
-                    for j in range(self.num_atoms):
-                        loc_observed[i][j] = loc[i][j][:-self.num_pre]
-                        vel_observed[i][j] = vel[i][j][:-self.num_pre]
-                        times_observed[i][j] = times[i][j][:-self.num_pre]
 
-                return loc_observed,vel_observed,times_observed/self.total_step
-            else:
-                return loc,vel,times/self.total_step
+        for i in range(self.num_graph):
+            for j in range(self.num_atoms):
+                loc_observed[i][j] = loc[i][j]
+                vel_observed[i][j] = vel[i][j]
+                times_observed[i][j] = times[i][j]
 
-
-        elif mode == "extrap":# split into 2 parts and normalize t seperately
-            loc_observed = np.ones(loc.shape[:2], dtype=object)
-            vel_observed = np.ones_like(loc_observed)
-            times_observed = np.ones_like(loc_observed)
-
-            loc_extrap = np.ones_like(loc_observed)
-            vel_extrap = np.ones_like(vel_observed)
-            times_extrap = np.ones_like(times_observed)
-
-            if data_type == "test":
-                for i in range(self.num_graph):
-                    for j in range(self.num_atoms):
-                        loc_observed[i][j] = loc[i][j][:-self.num_pre]
-                        vel_observed[i][j] = vel[i][j][:-self.num_pre]
-                        times_observed[i][j] = times[i][j][:-self.num_pre]
-
-                        loc_extrap[i][j] = loc[i][j][-self.num_pre:]
-                        vel_extrap[i][j] = vel[i][j][-self.num_pre:]
-                        times_extrap[i][j] = times[i][j][-self.num_pre:]
-                times_observed = times_observed/self.total_step
-                times_extrap = (times_extrap - self.total_step)/self.total_step
-            else:
-                for i in range(self.num_graph):
-                    for j in range(self.num_atoms):
-                        times_current = times[i][j]
-                        times_current_mask = np.where(times_current<self.total_step/2,times_current,0)
-                        if len(times_current_mask) > 0:
-                            num_observe_current = np.argmax(times_current_mask)+1
-                        else:
-                            num_observe_current = 0
-
-                        loc_observed[i][j] = loc[i][j][:num_observe_current]
-                        vel_observed[i][j] = vel[i][j][:num_observe_current]
-                        times_observed[i][j] = times[i][j][:num_observe_current]
-
-                        loc_extrap[i][j] = loc[i][j][num_observe_current:(num_observe_current + self.max_pred)]
-                        vel_extrap[i][j] = vel[i][j][num_observe_current:(num_observe_current + self.max_pred)]
-                        times_extrap[i][j] = times[i][j][num_observe_current:(num_observe_current + self.max_pred)]
-
-                times_observed = times_observed / self.total_step
-                times_extrap = (times_extrap - self.total_step/2) / self.total_step
-
-            return loc_observed,vel_observed,times_observed,loc_extrap,vel_extrap,times_extrap
+        return loc_observed,vel_observed,times_observed
 
 
     def split_data(self,loc,vel,times):
@@ -199,14 +113,10 @@ class ParseData(object):
 
         for i in range(self.num_graph):
             for j in range(self.num_atoms):
-                loc_list.append(loc[i][j][1:])  # [2500] num_train * num_ball
-                vel_list.append(vel[i][j][1:])
-                times_list.append(times[i][j][1:])
+                loc_list.append(loc[i][j])  # [2500] num_train * num_ball
+                vel_list.append(vel[i][j])
+                times_list.append(times[i][j])
 
-
-
-
-        series_list = []
         odernn_list = []
         for i, loc_series in enumerate(loc_list):
             # for encoder data
@@ -224,10 +134,11 @@ class ParseData(object):
             times_observe = -1 * np.ones(self.timelength)  # maximum #[T], padding -1
             mask_observe = np.zeros((self.timelength, self.feature))  # [T,D] 1 means observed
 
-            times_observe[:len(times_list[i][preserved_idx])] = times_list[i][preserved_idx]
-            feature_observe[:len(times_list[i][preserved_idx])] = np.concatenate(
-                (loc_series[preserved_idx], vel_list[i][preserved_idx]), axis=1)
-            mask_observe[:len(times_list[i][preserved_idx])] = 1
+            if preserved_idx: # If empy just keep as default
+                times_observe[:len(times_list[i][preserved_idx])] = times_list[i][preserved_idx]
+                feature_observe[:len(times_list[i][preserved_idx])] = np.concatenate(
+                    (loc_series[preserved_idx], vel_list[i][preserved_idx]), axis=1)
+                mask_observe[:len(times_list[i][preserved_idx])] = 1
 
             tt_observe = torch.FloatTensor(times_observe)
             vals_observe = torch.FloatTensor(feature_observe)
@@ -235,23 +146,7 @@ class ParseData(object):
 
             odernn_list.append((tt_observe, vals_observe, masks_observe))
 
-            # for decoder data, padding and mask
-            feature_predict = np.zeros((self.timelength, self.feature))  # [T,D]
-            times_predict = -1 * np.ones(self.timelength)  # maximum #[T], padding = 0, if have initial, then padding -1
-            mask_predict = np.zeros((self.timelength, self.feature))  # [T,D] 1 means observed
-
-            times_predict[:len(times_list[i])] = times_list[i]
-            feature_predict[:len(times_list[i])] = np.concatenate((loc_series, vel_list[i]), axis=1)
-            mask_predict[:len(times_list[i])] = 1
-
-            tt = torch.FloatTensor(times_predict)
-            vals = torch.FloatTensor(feature_predict)
-            masks = torch.FloatTensor(mask_predict)
-
-            series_list.append((tt, vals, masks))
-
-
-        return series_list, loc_observed, vel_observed, times_observed
+        return loc_observed, vel_observed, times_observed
 
     def decoder_data(self, loc, vel, times):
 
@@ -293,12 +188,8 @@ class ParseData(object):
         edge_size_list = []
 
         for i in tqdm(range(self.num_graph)):
-            try:
-                data_per_graph, edge_data, edge_size = self.transfer_one_graph(
-                        loc[i], vel[i], edges[i], times[i], time_begin=time_begin)
-            except AssertionError:
-                print("Sample with no obs. < N_T/2 found")
-
+            data_per_graph, edge_data, edge_size = self.transfer_one_graph(loc[i], vel[i], edges[i], times[i],
+                                                                           time_begin=time_begin)
             data_list.append(data_per_graph)
             graph_list.append(edge_data)
             edge_size_list.append(edge_size)
@@ -366,9 +257,6 @@ class ParseData(object):
                     ball_nodes[i].append(node_number)
 
                 node_number += 1
-
-        # Make sure there are some observations in sample
-        assert len(x_pos) > 0
 
         '''
          matrix computing

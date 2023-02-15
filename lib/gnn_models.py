@@ -280,9 +280,10 @@ class GNN(nn.Module):
 
         ### Output
         if batch!= None:  ## for encoder
+            n_balls=batch_y.shape[0]
             batch_new = self.rewrite_batch(batch,batch_y) #group by balls
             if self.aggregate == "add":
-                h_ball = global_mean_pool(h_t,batch_new) #[num_ball,d], without activation
+                h_ball = global_mean_pool(h_t,batch_new,size=n_balls) #[num_ball,d], without activation
 
             elif self.aggregate == "attention":
 
@@ -290,12 +291,12 @@ class GNN(nn.Module):
                 #h_t = F.gelu(self.w_transfer(torch.cat((h_t, edges_temporal), dim=1))) + edges_temporal
                 x_time = x_time.view(-1,1)
                 h_t = F.gelu(self.w_transfer(torch.cat((h_t, x_time), dim=1))) + self.temporal_net(x_time)
-                attention_vector = F.relu(self.sequence_w(global_mean_pool(h_t,batch_new))) #[num_ball,d] ,graph vector with activation Relu
+                attention_vector = F.relu(self.sequence_w(global_mean_pool(h_t,batch_new,size=n_balls))) #[num_ball,d] ,graph vector with activation Relu
                 attention_vector_expanded = self.attention_expand(attention_vector,batch,batch_y) #[num_nodes,d]
                 attention_nodes = torch.sigmoid(torch.squeeze(torch.bmm(torch.unsqueeze(attention_vector_expanded,1),torch.unsqueeze(h_t,2)))).view(-1,1) #[num_nodes]
                 nodes_attention = attention_nodes * h_t #[num_nodes,d]
-                h_ball = global_mean_pool(nodes_attention,batch_new) #[num_ball,d] without activation
-          
+                h_ball = global_mean_pool(nodes_attention,batch_new,size=n_balls) #[num_ball,d] without activation
+
 
             h_out = self.out_w_encoder(h_ball) #[num_ball,2d]
             mean,mu = self.split_mean_mu(h_out)

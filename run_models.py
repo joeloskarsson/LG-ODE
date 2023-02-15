@@ -8,6 +8,7 @@ from random import SystemRandom
 import torch
 import torch.optim as optim
 import lib.utils as utils
+import eval_model
 from torch.distributions.normal import Normal
 from lib.create_latent_ode_model import create_LatentODE_model
 from lib.utils import compute_loss_all_batches
@@ -23,7 +24,7 @@ parser.add_argument('--save', type=str, default='experiments/', help="Path for s
 parser.add_argument('--save-graph', type=str, default='plot/', help="Path for save checkpoints")
 parser.add_argument('--load', type=str, default=None, help="name of ckpt. If None, run a new experiment.")
 parser.add_argument('-r', '--random-seed', type=int, default=1991, help="Random_seed")
-parser.add_argument('--data', type=str, default='spring', help="spring,charged,motion")
+parser.add_argument('--data', type=str, default='bay_node_0.25', help="spring,charged,motion")
 parser.add_argument('--z0-encoder', type=str, default='GTrans', help="GTrans")
 parser.add_argument('-l', '--latents', type=int, default=16, help="Size of the latent state")
 parser.add_argument('--rec-dims', type=int, default= 64, help="Dimensionality of the recognition model .")
@@ -31,10 +32,10 @@ parser.add_argument('--ode-dims', type=int, default=128, help="Dimensionality of
 parser.add_argument('--rec-layers', type=int, default=2, help="Number of layers in recognition model ")
 parser.add_argument('--n-heads', type=int, default=1, help="Number of heads in GTrans")
 parser.add_argument('--gen-layers', type=int, default=1, help="Number of layers  ODE func ")
-parser.add_argument('--extrap', type=str,default="False", help="Set extrapolation mode. If this flag is not set, run interpolation mode.")
+parser.add_argument('--extrap', type=str,default="True", help="Set extrapolation mode. If this flag is not set, run interpolation mode.")
 parser.add_argument('--dropout', type=float, default=0.2,help='Dropout rate (1 - keep probability).')
-parser.add_argument('--sample-percent-train', type=float, default=0.6,help='Percentage of training observtaion data')
-parser.add_argument('--sample-percent-test', type=float, default=0.6,help='Percentage of testing observtaion data')
+parser.add_argument('--sample-percent-train', type=float, default=1.0,help='Percentage of training observtaion data')
+parser.add_argument('--sample-percent-test', type=float, default=1.0,help='Percentage of testing observtaion data')
 parser.add_argument('--augment_dim', type=int, default=64, help='augmented dimension')
 parser.add_argument('--edge_types', type=int, default=2, help='edge number in NRI')
 parser.add_argument('--odenet', type=str, default="NRI", help='NRI')
@@ -43,9 +44,13 @@ parser.add_argument('--l2', type=float, default=1e-3, help='l2 regulazer')
 parser.add_argument('--optimizer', type=str, default="AdamW", help='Adam, AdamW')
 parser.add_argument('--clip', type=float, default=10, help='Gradient Norm Clipping')
 parser.add_argument('--cutting_edge', type=bool, default=True, help='True/False')
-parser.add_argument('--extrap_num', type=int, default=40, help='extrap num ')
+parser.add_argument('--extrap_num', type=int, default=9, help='extrap num ') # Does not matter when no data loaded as test
 parser.add_argument('--rec_attention', type=str, default="attention")
 parser.add_argument('--alias', type=str, default="run")
+parser.add_argument('--test', type=int, default=0,
+        help="If model should be evaluated on test set")
+parser.add_argument("--max_pred", type=int, default=10,
+        help="Maximum number of time indices forward to predict (test)")
 
 
 
@@ -67,8 +72,27 @@ elif args.data == "motion":
     args.suffix = '_motion'
     args.total_ode_step=49
     args.n_balls = 31
+else:
+    # Converted datasets
+    args.dataset = f"data/{args.data}"
+    args.suffix = f"_{args.data}"
+    args.total_ode_step=1.0 # Total "number of time steps" in one time series
 
-
+    data_base = str.split(args.data, "_")[0]
+    if data_base == "bay":
+        if "subgraph" in args.data:
+            args.n_balls = 11
+        else:
+            args.n_balls = 319
+    elif data_base == "la":
+        if "subgraph" in args.data:
+            args.n_balls = 6
+        else:
+            args.n_balls = 206
+    elif data_base == "ushcn":
+        args.n_balls = 1123
+    elif data_base == "periodic":
+        args.n_balls = 20
 
 ############ CPU AND GPU related, Mode related, Dataset Related
 if torch.cuda.is_available():
@@ -107,14 +131,21 @@ if __name__ == '__main__':
     ############ Loading Data
     print("Loading dataset: " + args.dataset)
     dataloader = ParseData(args.dataset,suffix=args.suffix,mode=args.mode, args =args)
-    test_encoder, test_decoder, test_graph, test_batch = dataloader.load_data(sample_percent=args.sample_percent_test,
-                                                                              batch_size=args.batch_size,
-                                                                              data_type="test")
-    train_encoder,train_decoder, train_graph,train_batch = dataloader.load_data(sample_percent=args.sample_percent_train,batch_size=args.batch_size,data_type="train")
 
+    if args.test:
+        input_dim = 2
 
+    else:
+        train_encoder,train_decoder, train_graph,train_batch = dataloader.load_data(
+                sample_percent=args.sample_percent_train,batch_size=args.batch_size,
+                data_type="train")
 
-    input_dim = dataloader.feature
+        # Load validation data same way as train
+        val_encoder,val_decoder, val_graph,val_batch = dataloader.load_data(
+                sample_percent=args.sample_percent_train,batch_size=args.batch_size,
+                data_type="val")
+
+        input_dim = dataloader.feature
 
     ############ Command Related
     input_command = sys.argv
@@ -138,7 +169,13 @@ if __name__ == '__main__':
     if args.load is not None:
         ckpt_path = os.path.join(args.save, args.load)
         utils.get_ckpt_model(ckpt_path, model, device)
-        #exit()
+
+    ##################################################################
+    # Testing
+    if args.test:
+        with torch.no_grad():
+            test_preds = eval_model.get_test_predictions(model, dataloader, device, args)
+        exit()
 
     ##################################################################
     # Training
@@ -213,7 +250,7 @@ if __name__ == '__main__':
             loss, mse,likelihood,kl_first_p,std_first_p = train_single_batch(model,batch_dict_encoder,batch_dict_decoder,batch_dict_graph,kl_coef)
 
 
-        
+
             #saving results
             loss_list.append(loss), mse_list.append(mse), likelihood_list.append(
                likelihood)
@@ -227,7 +264,7 @@ if __name__ == '__main__':
         scheduler.step()
 
 
-        
+
 
         message_train = 'Epoch {:04d} [Train seq (cond on sampled tp)] | Loss {:.6f} | MSE {:.6F} | Likelihood {:.6f} | KL fp {:.4f} | FP STD {:.4f}|'.format(
             epo,
@@ -244,8 +281,8 @@ if __name__ == '__main__':
 
         if epo % n_iters_to_viz == 0:
             model.eval()
-            test_res = compute_loss_all_batches(model, test_encoder, test_graph, test_decoder,
-                                                n_batches=test_batch, device=device,
+            test_res = compute_loss_all_batches(model, val_encoder, val_graph, val_decoder,
+                                                n_batches=val_batch, device=device,
                                                 n_traj_samples=3, kl_coef=kl_coef)
 
             message_test = 'Epoch {:04d} [Test seq (cond on sampled tp)] | Loss {:.6f} | MSE {:.6F} | Likelihood {:.6f} | KL fp {:.4f} | FP STD {:.4f}|'.format(

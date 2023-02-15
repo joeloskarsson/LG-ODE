@@ -1,4 +1,25 @@
-# LG-ODE
+# Modified version of LG-ODE implementation
+This repository contains a modified version of the LG-ODE implementation, used in our paper *Temporal Graph Neural Networks for Irregular Data*.
+Please see our [main repository](https://github.com/joeloskarsson/tgnn4i) for the paper for more information.
+We are grateful to the original LG-ODE authors for making their code [openly available](https://github.com/ZijieH/LG-ODE).
+
+The modifications made to the implementation are mainly:
+
+* Ability to load our datasets
+* The use of a validation set during training
+* Addition of a function to separately evaluate the model on test data
+
+### Using the LG-ODE model with datasets from TGNN4I
+To train and evaluate the LG-ODE model with our datasets:
+
+* Convert the dataset to a suitable format for LG-ODE using the script `convert_to_lgode.py` found in the [main repository](https://github.com/joeloskarsson/tgnn4i).
+* Place the converted dataset (the full folder) in the `data` directory in this repository.
+* Train the LG-ODE model using `run_models.py`.
+* To evaluate a trained model on the test set, use `run_models.py` with the flags `--test 1` and `--load` set to the name of the file to load model parameters from.
+The evaluation script will then create a `.pt`-file with predictions.
+* Use the script `eval_saved_predictions.py` in the [main repository](https://github.com/joeloskarsson/tgnn4i) to compute the final test errors.
+
+# (Original README) LG-ODE
 
 LG-ODE is an overall framework for learning continuous multi-agent system dynamics from irregularly-sampled partial observations considering graph structure.
 
@@ -11,14 +32,14 @@ Generate simulated datasets (spring, charged particles) by running:
 
 ```bash
 cd data
-python generate_dataset.py 
+python generate_dataset.py
 ```
 
-This generates the springs dataset, use `--simulation charged` for charged particles. 
+This generates the springs dataset, use `--simulation charged` for charged particles.
 
-As simulated data is too large, we provide a toy-data from spring dataset and can be found under `data/example_data` 
+As simulated data is too large, we provide a toy-data from spring dataset and can be found under `data/example_data`
 
-Motion dataset can be downloaded [CMU MoCap](http://mocap.cs.cmu.edu/) 
+Motion dataset can be downloaded [CMU MoCap](http://mocap.cs.cmu.edu/)
 
 
 
